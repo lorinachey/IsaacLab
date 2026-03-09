@@ -106,10 +106,8 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 #   [9:12] velocity_cmds  [12:24] joint_pos     [24:36] joint_vel  [36:48] actions
 VEL_CMD_OBS_SLICE = slice(9, 12)
 
-# Locomotion policy step rate — SpotFlatEnvCfg: sim.dt=0.002, decimation=10 → 50 Hz
-POLICY_HZ = 50
-# Camera / data-logging rate
-LOG_HZ = 10
+POLICY_HZ = 50        # SpotFlatEnvCfg: sim.dt=0.002, decimation=10 → 50 Hz
+LOG_HZ = 10           # camera / dataset logging rate
 LOG_EVERY_N = POLICY_HZ // LOG_HZ  # log every 5 policy steps
 
 WAREHOUSE_USD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spot-in-simple-warehouse.usd")
@@ -117,7 +115,30 @@ WAREHOUSE_USD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spot-i
 
 # ── Data collector ─────────────────────────────────────────────────────────────
 class HDF5DataCollector:
-    """Buffers per-step data in memory and writes completed episodes to HDF5."""
+    """Buffers per-step data in memory and writes completed episodes to HDF5.
+
+    Each episode is stored as a group ``episode_<N>`` with the following layout::
+
+        episode_N/
+            obs/
+                camera_rgb          (T, H, W, 3)  uint8
+                base_pose           (T, 7)         float32  pos(3) + quat_wxyz(4)
+                base_lin_vel        (T, 3)         float32  world frame
+                base_ang_vel        (T, 3)         float32  world frame
+                joint_pos           (T, 12)        float32
+                joint_vel           (T, 12)        float32
+                contact_forces      (T, N_feet, 3) float32  net forces world frame
+                goal_relative       (T, 3)         float32  goal minus robot pos
+                policy_obs          (T, 48)        float32  raw locomotion policy input
+            action/
+                velocity_cmd        (T, 3)         float32  gamepad [v_x, v_y, omega_z]
+                joint_targets       (T, 12)        float32  raw policy output
+            attrs:
+                success             bool
+                episode_length      int
+                goal_position_world (3,)  float32
+                timestamp           str   ISO-8601 wall-clock time at flush
+    """
 
     def __init__(self, filepath: str, session_timestamp: str):
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
@@ -127,20 +148,19 @@ class HDF5DataCollector:
         self._file.attrs["session_timestamp"] = session_timestamp
         print(f"[DataCollector] Writing to {filepath} (starting at episode {self._episode_idx})")
 
-    # ------------------------------------------------------------------
     def buffer_step(
         self,
         camera_rgb: np.ndarray,      # (H, W, 3) uint8
-        base_pose: np.ndarray,        # (7,)  pos(3) + quat_wxyz(4)
-        base_lin_vel: np.ndarray,     # (3,)  world frame
-        base_ang_vel: np.ndarray,     # (3,)  world frame
+        base_pose: np.ndarray,        # (7,)
+        base_lin_vel: np.ndarray,     # (3,)
+        base_ang_vel: np.ndarray,     # (3,)
         joint_pos: np.ndarray,        # (12,)
         joint_vel: np.ndarray,        # (12,)
-        contact_forces: np.ndarray,   # (N_feet, 3) net forces world frame
-        goal_relative: np.ndarray,    # (3,)  goal minus robot position, world frame
-        policy_obs: np.ndarray,       # (48,) raw 48-dim locomotion policy input
-        velocity_cmd: np.ndarray,     # (3,)  [v_x, v_y, omega_z] from gamepad
-        joint_targets: np.ndarray,    # (12,) raw policy output (pre-scaling)
+        contact_forces: np.ndarray,   # (N_feet, 3)
+        goal_relative: np.ndarray,    # (3,)
+        policy_obs: np.ndarray,       # (48,)
+        velocity_cmd: np.ndarray,     # (3,)
+        joint_targets: np.ndarray,    # (12,)
     ):
         self._buf["obs/camera_rgb"].append(camera_rgb)
         self._buf["obs/base_pose"].append(base_pose)
@@ -154,9 +174,8 @@ class HDF5DataCollector:
         self._buf["action/velocity_cmd"].append(velocity_cmd)
         self._buf["action/joint_targets"].append(joint_targets)
 
-    # ------------------------------------------------------------------
     def flush_episode(self, success: bool, goal_position_world: np.ndarray) -> int:
-        """Write buffered steps as a new episode group. Returns episode index."""
+        """Write buffered steps as a new episode group and clear the buffer."""
         if not self._buf:
             return self._episode_idx
 
@@ -181,6 +200,7 @@ class HDF5DataCollector:
         return self._episode_idx - 1
 
     def discard_episode(self):
+        """Discard buffered steps without writing (e.g. accidental resets)."""
         n = len(next(iter(self._buf.values()))) if self._buf else 0
         self._buf.clear()
         if n:

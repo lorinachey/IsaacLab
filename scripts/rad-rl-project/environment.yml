@@ -1,0 +1,168 @@
+# Conda environment for the rad-rl-project demo-collection stack.
+#
+# Prerequisites
+# -------------
+#   - NVIDIA GPU with CUDA 12.8-compatible driver (≥ 525.85)
+#   - Ubuntu 22.04 (the isaacsim pip wheels are Linux-only)
+#   - For Xbox controller support: add your user to the 'input' group
+#       sudo usermod -aG input $USER   # then log out and back in
+#
+# Create & activate
+# -----------------
+#   conda env create -f environment.yml
+#   conda activate isaaclab
+#
+# Install IsaacLab from source (required — not on PyPI)
+# -------------------------------------------------------
+#   cd <IsaacLab-repo-root>
+#   ./isaaclab.sh --install          # installs isaaclab, isaaclab_rl,
+#                                    # isaaclab_tasks, isaaclab_assets
+
+# Workflow to create the environment and install the dependencies
+# conda env create -f scripts/rad-rl-project/environment.yml
+# conda activate isaaclab
+# cd <IsaacLab-repo-root>
+# ./isaaclab.sh --install
+# # add to input group for controller
+# sudo usermod -aG input $USER && newgrp input
+#
+# NOTE: The isaacsim-* packages are served from NVIDIA's private pip index
+# (https://pypi.nvidia.com).  The --extra-index-url entries below tell pip
+# where to find them; conda passes these through to pip during env creation.
+
+name: isaaclab
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip
+
+  - pip:
+    # ── Extra pip indexes ──────────────────────────────────────────────────────
+    - --extra-index-url https://pypi.nvidia.com
+    - --extra-index-url https://download.pytorch.org/whl/cu128
+
+    # ── Isaac Sim 5.1.0 (NVIDIA pip index) ───────────────────────────────────
+    - isaacsim==5.1.0.0
+    - isaacsim-app==5.1.0.0
+    - isaacsim-asset==5.1.0.0
+    - isaacsim-benchmark==5.1.0.0
+    - isaacsim-code-editor==5.1.0.0
+    - isaacsim-core==5.1.0.0
+    - isaacsim-cortex==5.1.0.0
+    - isaacsim-example==5.1.0.0
+    - isaacsim-extscache-kit==5.1.0.0
+    - isaacsim-extscache-kit-sdk==5.1.0.0
+    - isaacsim-extscache-physics==5.1.0.0
+    - isaacsim-gui==5.1.0.0
+    - isaacsim-kernel==5.1.0.0
+    - isaacsim-replicator==5.1.0.0
+    - isaacsim-rl==5.1.0.0
+    - isaacsim-robot==5.1.0.0
+    - isaacsim-robot-motion==5.1.0.0
+    - isaacsim-robot-setup==5.1.0.0
+    - isaacsim-ros2==5.1.0.0
+    - isaacsim-sensor==5.1.0.0
+    - isaacsim-storage==5.1.0.0
+    - isaacsim-template==5.1.0.0
+    - isaacsim-test==5.1.0.0
+    - isaacsim-utils==5.1.0.0
+    - omniverse-kit==107.3.1.206797
+    - warp-lang==1.9.1
+
+    # ── PyTorch 2.7 + CUDA 12.8 ───────────────────────────────────────────────
+    - torch==2.7.0+cu128
+    - torchvision==0.22.0+cu128
+    - torchaudio==2.7.0
+    - triton==3.3.0
+
+    # ── NVIDIA CUDA runtime libs (pulled in as torch deps) ────────────────────
+    - nvidia-cublas-cu12==12.8.3.14
+    - nvidia-cuda-cupti-cu12==12.8.57
+    - nvidia-cuda-nvrtc-cu12==12.8.61
+    - nvidia-cuda-runtime-cu12==12.8.57
+    - nvidia-cudnn-cu12==9.7.1.26
+    - nvidia-cufft-cu12==11.3.3.41
+    - nvidia-curand-cu12==10.3.9.55
+    - nvidia-cusolver-cu12==11.7.2.55
+    - nvidia-cusparse-cu12==12.5.7.53
+    - nvidia-nccl-cu12==2.26.2
+    - nvidia-nvjitlink-cu12==12.8.61
+    - nvidia-nvtx-cu12==12.8.55
+
+    # ── RL frameworks ─────────────────────────────────────────────────────────
+    - rsl-rl-lib==5.0.1
+    - gymnasium==1.2.1
+    - stable-baselines3==2.7.0
+    - skrl==1.4.3
+    - rl_games==1.6.1
+
+    # ── Numerical / data ──────────────────────────────────────────────────────
+    - numpy==1.26.0
+    - numpy-quaternion==2023.0.3
+    - scipy==1.15.3
+    - scikit-learn==1.7.2
+    - pandas==2.3.3
+    - h5py==3.14.0
+    - einops==0.8.1
+    - tensordict==0.9.0
+
+    # ── Robotics / simulation utilities ───────────────────────────────────────
+    - trimesh==4.5.1
+    - pytransform3d==3.14.3
+    - hydra-core==1.3.2
+    - omegaconf==2.3.0
+    - packaging==23.0
+    - anytree==2.13.0
+    - loop-rate-limiters==1.2.0
+
+    # ── Input devices (Xbox / gamepad) ────────────────────────────────────────
+    - evdev==1.9.2
+    - hidapi==0.14.0.post2
+    - pynput==1.8.1
+
+    # ── Visualization / logging ───────────────────────────────────────────────
+    - matplotlib==3.10.3
+    - seaborn==0.13.2
+    - tensorboard==2.20.0
+    - tensorboardX==2.6.4
+    - wandb==0.22.2
+    - rerun-sdk==0.22.1
+    - plotly==5.3.1
+    - imageio==2.37.0
+    - imageio-ffmpeg==0.6.0
+    - opencv-python==4.11.0.86
+    - pillow==11.3.0
+
+    # ── ML utilities ──────────────────────────────────────────────────────────
+    - huggingface-hub==0.35.3
+    - transformers==4.57.6
+    - diffusers==0.35.1
+    - safetensors==0.6.2
+    - tokenizers==0.22.1
+    - datasets==4.1.1
+    - onnx==1.19.0
+
+    # ── General utilities ─────────────────────────────────────────────────────
+    - tqdm==4.67.1
+    - rich==14.1.0
+    - click==8.1.7
+    - pydantic==2.11.10
+    - PyYAML==6.0.2
+    - tomli==2.2.1
+    - filelock==3.13.1
+    - psutil==5.9.8
+    - gitpython==3.1.45
+    - cloudpickle==3.1.1
+    - joblib==1.5.2
+    - sympy==1.13.3
+    - networkx==3.3
+    - numba==0.59.1
+    - ray==2.49.2
+    - fastapi==0.115.7
+    - uvicorn==0.29.0
+    - requests==2.32.3
+    - ipython==9.6.0
