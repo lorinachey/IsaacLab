@@ -29,6 +29,7 @@ Usage:
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import os
 import sys
 
 from isaaclab.app import AppLauncher
@@ -38,7 +39,7 @@ parser.add_argument("--checkpoint", type=str, required=True, help="Path to train
 parser.add_argument(
     "--dataset_file",
     type=str,
-    default="./datasets/warehouse_demos.hdf5",
+    default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "datasets", "warehouse_demos.hdf5"),
     help="Output HDF5 file path.",
 )
 parser.add_argument("--num_episodes", type=int, default=0, help="Episodes to collect before quitting (0 = infinite).")
@@ -48,9 +49,9 @@ parser.add_argument(
     "--goal_position",
     type=float,
     nargs=3,
-    default=[8.0, 0.0, -5.0],
+    default=[8.0, 0.0, 0.0],
     metavar=("X", "Y", "Z"),
-    help="Goal marker position in world frame (metres). Default: 8.0 0.0 -5.0",
+    help="Goal marker position in world frame (metres). Default: 8.0 0.0 0.0",
 )
 parser.add_argument(
     "--success_radius",
@@ -258,13 +259,25 @@ def build_env_cfg(args):
         init_state=AssetBaseCfg.InitialStateCfg(pos=goal_pos),
     )
 
-    env_cfg.scene.robot.init_state.pos = (9.0, -8.0, 0.5)
+    env_cfg.scene.robot.init_state.pos = (8.0, -8.0, 0.7)
 
     # Disable terminations and curriculum that require a procedural terrain_generator;
     # both crash on a static USD scene where terrain_generator is None.
     env_cfg.terminations.time_out = None
     env_cfg.terminations.terrain_out_of_bounds = None
     env_cfg.curriculum = None
+
+    # Remove training-time destabilisation events that are inappropriate for demo
+    # collection. With these nulled, Spot resets cleanly to init_state.pos with
+    # zero velocity and default joint angles each episode:
+    #   - reset_base:        random body velocity up to ±1.5 m/s and ±0.7 rad/s
+    #   - reset_robot_joints: random joint velocity up to ±2.5 rad/s
+    #   - push_robot:         random velocity push every 10-15 s (was supposed to
+    #                         be removed in SpotFlatEnvCfg_PLAY but line was never
+    #                         written — only the comment exists in that class)
+    env_cfg.events.reset_base = None
+    env_cfg.events.reset_robot_joints = None
+    env_cfg.events.push_robot = None
 
     return env_cfg
 
@@ -308,6 +321,15 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
     physics_step = 0   # policy steps within current episode
     data_step = 0      # 10 Hz samples within current episode
 
+    # ── Gamepad diagnostics ────────────────────────────────────────────────────
+    gamepad_name = gamepad._input.get_gamepad_name(gamepad._gamepad)
+    print(f"\n[GAMEPAD] carb.input detected device: '{gamepad_name}'")
+    if not gamepad_name:
+        print("[GAMEPAD] WARNING: no gamepad detected by carb.input — "
+              "controller inputs will be ignored. Check that the controller "
+              "is plugged in and your user is in the 'input' group.")
+    # ──────────────────────────────────────────────────────────────────────────
+
     print("\n[INFO] Collection running. Drive Spot with the Xbox controller.")
     print("       A = success  |  B = failure/reset  |  START (MENU1) = quit\n")
 
@@ -321,6 +343,12 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
             vel_cmd[1].clamp(-1.5, 1.5),   # lin_vel_y: [-1.5, +1.5] m/s
             vel_cmd[2].clamp(-2.0, 2.0),   # ang_vel_z: [-2.0, +2.0] rad/s
         ])
+
+        # Print vel_cmd once per second so you can verify controller input.
+        # Remove this block once the controller is confirmed working.
+        if physics_step % POLICY_HZ == 0:
+            vc = vel_cmd.cpu().numpy()
+            print(f"[GAMEPAD] vel_cmd  vx={vc[0]:+.3f}  vy={vc[1]:+.3f}  wz={vc[2]:+.3f}")
 
         # ── 2. Inject gamepad command into obs for the locomotion policy ───
         # The env's internal command manager may have resampled; we replace
@@ -445,7 +473,7 @@ def main():
             v_x_sensitivity=3.0,    # lin_vel_x trained range: [-2.0, +3.0] m/s
             v_y_sensitivity=1.5,    # lin_vel_y trained range: [-1.5, +1.5] m/s
             omega_z_sensitivity=2.0,  # ang_vel_z trained range: [-2.0, +2.0] rad/s
-            dead_zone=0.05,
+            dead_zone=0.12,   # 0.12 clears the ~0.09 drift observed on this controller
             sim_device=device,
         )
     )
