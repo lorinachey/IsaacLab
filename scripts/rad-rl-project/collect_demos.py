@@ -17,7 +17,7 @@ Xbox controller bindings:
     Right stick X       Turn left-right (omega_z)
     A button            Mark episode as SUCCESS and reset
     B button            Mark episode as FAILURE / force reset
-    START               Quit collection
+    START (MENU1)       Quit collection
 
 Usage:
     ./isaaclab.sh -p scripts/rad-rl-project/collect_demos.py \\
@@ -48,9 +48,9 @@ parser.add_argument(
     "--goal_position",
     type=float,
     nargs=3,
-    default=[8.0, 0.0, 0.0],
+    default=[8.0, 0.0, -5.0],
     metavar=("X", "Y", "Z"),
-    help="Goal marker position in world frame (metres). Default: 8.0 0.0 0.0",
+    help="Goal marker position in world frame (metres). Default: 8.0 0.0 -5.0",
 )
 parser.add_argument(
     "--success_radius",
@@ -258,8 +258,13 @@ def build_env_cfg(args):
         init_state=AssetBaseCfg.InitialStateCfg(pos=goal_pos),
     )
 
-    # Disable timeout — episodes end via human gamepad input or termination
+    env_cfg.scene.robot.init_state.pos = (9.0, -8.0, 0.5)
+
+    # Disable terminations and curriculum that require a procedural terrain_generator;
+    # both crash on a static USD scene where terrain_generator is None.
     env_cfg.terminations.time_out = None
+    env_cfg.terminations.terrain_out_of_bounds = None
+    env_cfg.curriculum = None
 
     return env_cfg
 
@@ -294,7 +299,7 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
 
     gamepad.add_callback(carb.input.GamepadInput.A, lambda: flags.update({"success": True}))
     gamepad.add_callback(carb.input.GamepadInput.B, lambda: flags.update({"failure": True}))
-    gamepad.add_callback(carb.input.GamepadInput.START, lambda: flags.update({"quit": True}))
+    gamepad.add_callback(carb.input.GamepadInput.MENU1, lambda: flags.update({"quit": True}))
 
     obs, _ = env_wrapped.reset()
     gamepad.reset()
@@ -304,7 +309,7 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
     data_step = 0      # 10 Hz samples within current episode
 
     print("\n[INFO] Collection running. Drive Spot with the Xbox controller.")
-    print("       A = success  |  B = failure/reset  |  START = quit\n")
+    print("       A = success  |  B = failure/reset  |  START (MENU1) = quit\n")
 
     while simulation_app.is_running() and not flags["quit"]:
         # ── 1. Read velocity command from gamepad ──────────────────────────
