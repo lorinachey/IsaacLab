@@ -21,7 +21,7 @@ Xbox controller bindings:
 
 Usage:
     ./isaaclab.sh -p scripts/rad-rl-project/collect_demos.py \\
-        --checkpoint <path/to/model.pt> \\
+        --checkpoint logs/rsl_rl/spot_flat/2026-03-09_15-47-17/model_19999.pt \\
         --dataset_file datasets/warehouse_demos.hdf5 \\
         --enable_cameras
 """
@@ -309,6 +309,13 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
     while simulation_app.is_running() and not flags["quit"]:
         # ── 1. Read velocity command from gamepad ──────────────────────────
         vel_cmd = gamepad.advance()  # tensor (3,) on device: [v_x, v_y, omega_z]
+        # Clamp to the ranges seen during training so that asymmetric axes
+        # (e.g. lin_vel_x: [-2.0, +3.0]) are never commanded out-of-distribution.
+        vel_cmd = torch.stack([
+            vel_cmd[0].clamp(-2.0, 3.0),   # lin_vel_x: [-2.0, +3.0] m/s
+            vel_cmd[1].clamp(-1.5, 1.5),   # lin_vel_y: [-1.5, +1.5] m/s
+            vel_cmd[2].clamp(-2.0, 2.0),   # ang_vel_z: [-2.0, +2.0] rad/s
+        ])
 
         # ── 2. Inject gamepad command into obs for the locomotion policy ───
         # The env's internal command manager may have resampled; we replace
@@ -425,11 +432,14 @@ def main():
     policy, agent_cfg = load_policy(env_wrapped, checkpoint_path, device)
 
     # Xbox controller (Se2Gamepad outputs [v_x, v_y, omega_z])
+    # v_x_sensitivity=3.0 maps full-forward stick to the training max of +3 m/s.
+    # Commands are clamped to training ranges inside run_collection so that
+    # full-backward stick (-3.0) is clipped to the trained minimum of -2.0 m/s.
     gamepad = Se2Gamepad(
         Se2GamepadCfg(
-            v_x_sensitivity=2.0,    # matches training range: lin_vel_x up to ±2 m/s
-            v_y_sensitivity=1.5,    # matches training range: lin_vel_y up to ±1.5 m/s
-            omega_z_sensitivity=2.0,  # matches training range: ang_vel_z up to ±2 rad/s
+            v_x_sensitivity=3.0,    # lin_vel_x trained range: [-2.0, +3.0] m/s
+            v_y_sensitivity=1.5,    # lin_vel_y trained range: [-1.5, +1.5] m/s
+            omega_z_sensitivity=2.0,  # ang_vel_z trained range: [-2.0, +2.0] rad/s
             dead_zone=0.05,
             sim_device=device,
         )
