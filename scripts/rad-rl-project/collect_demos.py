@@ -91,6 +91,8 @@ from rsl_rl.runners import OnPolicyRunner
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.devices.gamepad import Se2Gamepad, Se2GamepadCfg
+from isaaclab.envs.mdp.events import reset_root_state_uniform
+from isaaclab.managers import EventTermCfg, SceneEntityCfg
 from isaaclab.sensors import CameraCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils.assets import retrieve_file_path
@@ -99,6 +101,7 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.manager_based.locomotion.velocity.config.spot.agents.rsl_rl_ppo_cfg import SpotFlatPPORunnerCfg
+from isaaclab_tasks.manager_based.locomotion.velocity.config.spot.mdp import reset_joints_around_default
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -259,7 +262,7 @@ def build_env_cfg(args):
         init_state=AssetBaseCfg.InitialStateCfg(pos=goal_pos),
     )
 
-    env_cfg.scene.robot.init_state.pos = (8.0, -8.0, 0.7)
+    env_cfg.scene.robot.init_state.pos = (6.0, -8.5, 0.5)
 
     # Disable terminations and curriculum that require a procedural terrain_generator;
     # both crash on a static USD scene where terrain_generator is None.
@@ -267,16 +270,40 @@ def build_env_cfg(args):
     env_cfg.terminations.terrain_out_of_bounds = None
     env_cfg.curriculum = None
 
-    # Remove training-time destabilisation events that are inappropriate for demo
-    # collection. With these nulled, Spot resets cleanly to init_state.pos with
-    # zero velocity and default joint angles each episode:
-    #   - reset_base:        random body velocity up to ±1.5 m/s and ±0.7 rad/s
-    #   - reset_robot_joints: random joint velocity up to ±2.5 rad/s
-    #   - push_robot:         random velocity push every 10-15 s (was supposed to
-    #                         be removed in SpotFlatEnvCfg_PLAY but line was never
-    #                         written — only the comment exists in that class)
-    env_cfg.events.reset_base = None
-    env_cfg.events.reset_robot_joints = None
+    # Replace training-time reset events with demo-collection-friendly versions.
+    #
+    # reset_base MUST remain active: Articulation.reset() restores default_root_state,
+    # which is captured from the USD placement position at startup — NOT from our
+    # init_state.pos override. Without an explicit reset_base event, Spot teleports
+    # back to the warehouse origin (inside a wall) each episode, causing immediate
+    # body_contact termination. We keep position randomisation (±0.5 m / full yaw)
+    # but zero out the velocity_range that was flipping Spot over at spawn.
+    env_cfg.events.reset_base = EventTermCfg(
+        func=reset_root_state_uniform,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (3.14159, 3.14159)},
+            "velocity_range": {},   # no initial linear or angular velocity
+        },
+    )
+
+    # reset_robot_joints must also stay active so joints are written to PhysX at
+    # reset. Without it, joint positions in the simulator remain at whatever they
+    # were when the previous episode ended. Small position jitter (±0.1 rad) is
+    # fine; velocity is zeroed so legs aren't already moving at spawn.
+    env_cfg.events.reset_robot_joints = EventTermCfg(
+        func=reset_joints_around_default,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "position_range": (-0.1, 0.1),
+            "velocity_range": (0.0, 0.0),
+        },
+    )
+
+    # push_robot was supposed to be removed in SpotFlatEnvCfg_PLAY but the line
+    # was never written (only the comment). Disable it here explicitly.
     env_cfg.events.push_robot = None
 
     return env_cfg
@@ -339,9 +366,9 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
         # Clamp to the ranges seen during training so that asymmetric axes
         # (e.g. lin_vel_x: [-2.0, +3.0]) are never commanded out-of-distribution.
         vel_cmd = torch.stack([
-            vel_cmd[0].clamp(-2.0, 3.0),   # lin_vel_x: [-2.0, +3.0] m/s
-            vel_cmd[1].clamp(-1.5, 1.5),   # lin_vel_y: [-1.5, +1.5] m/s
-            vel_cmd[2].clamp(-2.0, 2.0),   # ang_vel_z: [-2.0, +2.0] rad/s
+            vel_cmd[0].clamp(-2.0, 3.0),    # lin_vel_x: [-2.0, +3.0] m/s
+            (-vel_cmd[1]).clamp(-1.5, 1.5), # lin_vel_y: negated to match physical stick direction
+            (-vel_cmd[2]).clamp(-2.0, 2.0),  # ang_vel_z: negated to match physical stick direction
         ])
 
         # Print vel_cmd once per second so you can verify controller input.
