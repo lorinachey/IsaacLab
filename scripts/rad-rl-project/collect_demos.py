@@ -49,9 +49,9 @@ parser.add_argument(
     "--goal_position",
     type=float,
     nargs=3,
-    default=[8.0, 0.0, 0.0],
+    default=[8.76, -1.27, 0.0],
     metavar=("X", "Y", "Z"),
-    help="Goal marker position in world frame (metres). Default: 8.0 0.0 0.0",
+    help="Goal marker position in world frame (metres). Default: 8.76 -1.27 0.0",
 )
 parser.add_argument(
     "--success_radius",
@@ -453,11 +453,15 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
             else:
                 collector.discard_episode()
 
+            # If the env didn't terminate on its own (human button or auto-success),
+            # we must explicitly reset so Spot teleports back to spawn.
+            if not env_done:
+                obs, _ = env_wrapped.reset()
+
             # Reset recurrent policy state if applicable
             if rsl_rl_version >= version.parse("4.0.0"):
                 policy.reset(dones)
 
-            # Clear episode state (env already auto-reset inside the wrapper)
             physics_step = 0
             data_step = 0
             flags["success"] = False
