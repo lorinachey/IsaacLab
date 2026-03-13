@@ -56,6 +56,20 @@ EXPECTED_DATASETS = {
     "action/joint_targets": (2, "f"),   # (T, 12)
 }
 
+# Reward datasets are optional (not present in datasets collected before reward
+# integration).  When present, they are all 1-D float arrays of length T.
+REWARD_DATASETS = [
+    "reward/total",
+    "reward/time_penalty",
+    "reward/termination_penalty",
+    "reward/goal_reached",
+    "reward/goal_approach",
+    "reward/command_tracking",
+    "reward/command_smoothness",
+    "reward/body_contact",
+    "reward/uprightness",
+]
+
 EXPECTED_DIMS = {
     "obs/base_pose":        7,
     "obs/base_lin_vel":     3,
@@ -246,6 +260,48 @@ def validate(hdf5_path: str) -> bool:
                         f"position jump of {max_delta:.3f} m at step {bad_step} "
                         f"(threshold={MAX_POSITION_JUMP_M} m)"
                     )
+
+            # ── 14. Reward datasets (optional — backward compatible) ──────
+            has_any_reward = any(rd in ep for rd in REWARD_DATASETS)
+            if has_any_reward:
+                for rd in REWARD_DATASETS:
+                    if rd not in ep:
+                        ep_errors.append(f"partial reward data: missing '{rd}'")
+                    else:
+                        ds = ep[rd]
+                        if ds.ndim != 1:
+                            ep_errors.append(f"'{rd}': expected ndim=1, got {ds.ndim}")
+                        elif ds.shape[0] != T:
+                            ep_errors.append(f"'{rd}': length={ds.shape[0]} ≠ episode T={T}")
+                        elif ds.dtype.kind != "f":
+                            ep_errors.append(f"'{rd}': expected float dtype, got {ds.dtype}")
+
+                # Verify total ≈ weighted sum of components (if all present)
+                all_reward_present = all(rd in ep for rd in REWARD_DATASETS)
+                if all_reward_present:
+                    stored_total = ep["reward/total"][()]
+                    # Reconstruct total from components using stored weights
+                    weight_map = {
+                        "time_penalty": "w_time_penalty",
+                        "termination_penalty": "w_termination",
+                        "goal_reached": "w_goal_reached",
+                        "goal_approach": "w_goal_approach",
+                        "command_tracking": "w_command_tracking",
+                        "command_smoothness": "w_command_smoothness",
+                        "body_contact": "w_body_contact",
+                        "uprightness": "w_uprightness",
+                    }
+                    reconstructed = np.zeros(T, dtype=np.float32)
+                    for comp, attr in weight_map.items():
+                        attr_key = f"reward_config/{attr}"
+                        if attr_key in f.attrs:
+                            w = float(f.attrs[attr_key])
+                            reconstructed += w * ep[f"reward/{comp}"][()]
+                    max_total_diff = np.abs(stored_total - reconstructed).max()
+                    if max_total_diff > 1e-4:
+                        ep_errors.append(
+                            f"reward/total ≠ weighted sum of components (max |diff|={max_total_diff:.6f})"
+                        )
 
             # ── Per-episode summary ───────────────────────────────────────
             if ep_errors:

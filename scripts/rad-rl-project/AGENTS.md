@@ -41,16 +41,17 @@ HDF5 dataset  (datasets/warehouse_demos_<timestamp>.hdf5)
 ```
 scripts/rad-rl-project/
 ├── collect_demos.py              # Main collection script — primary file
+├── rewards.py                    # Reward computation (offline batch + online step-by-step)
 ├── spot-in-simple-warehouse.usd  # Warehouse scene with collision geometry
 ├── environment.yml               # Conda env spec (conda env create -f ...)
 ├── README.md                     # Human-facing setup & usage docs
 ├── AGENTS.md                     # This file — AI agent briefing
 ├── utils.ipynb                   # HuggingFace checkpoint upload
 ├── datasets/
-│   └── warehouse_demos_<ts>.hdf5 # Collected episode data
+│   └── warehouse_demos_<ts>.hdf5 # Collected episode data (with reward/ group)
 └── tests/
-    ├── validate_dataset.py        # CLI validation: 13 structural/semantic checks
-    └── explore_dataset.ipynb      # Jupyter visualisation notebook (9 sections)
+    ├── validate_dataset.py        # CLI validation: 14 structural/semantic checks
+    └── explore_dataset.ipynb      # Jupyter visualisation notebook (11 sections)
 ```
 
 **Policy checkpoint** (trained, do not re-train unless explicitly asked):
@@ -171,8 +172,12 @@ the floor and the body-contact termination triggers immediately.
 
 ### 5.6 Gamepad dead zone
 
-`dead_zone=0.12` in `Se2GamepadCfg`. The physical controller has ~0.09 stick drift
-at rest; 0.12 clears it. Do not lower this below 0.10.
+`dead_zone=0.05` in `Se2GamepadCfg`. This filters raw stick values below 0.05
+(applied per-event inside `Se2Gamepad._on_gamepad_event` before sensitivity
+scaling). A value of 0.05 handles normal analog stick noise on a healthy
+controller. If you see drift, verify with `jstest /dev/input/js0` — the
+previous Rock Candy controller had a physically broken left-stick X axis
+(resting at 85% deflection) which no software dead zone could fix.
 
 ---
 
@@ -221,6 +226,7 @@ RR_hx, RR_hy, RR_kn    # Rear-right
 ```
 <file>.hdf5
 ├── attrs: session_timestamp (str)
+│         reward_config/*    (float — one attr per RewardConfig field)
 └── episode_N/
     ├── attrs: success (bool), episode_length (int),
     │         goal_position_world (float32[3]), timestamp (str ISO-8601)
@@ -234,13 +240,34 @@ RR_hx, RR_hy, RR_kn    # Rear-right
     │   ├── contact_forces   (T, 17, 3) float32  — 17 bodies, net force world frame
     │   ├── goal_relative    (T, 3)   float32  — goal_world − base_pos
     │   └── policy_obs       (T, 48)  float32
-    └── action/
-        ├── velocity_cmd     (T, 3)   float32  — gamepad [v_x, v_y, ω_z], post-negation
-        └── joint_targets    (T, 12)  float32  — raw policy output
+    ├── action/
+    │   ├── velocity_cmd     (T, 3)   float32  — gamepad [v_x, v_y, ω_z], post-negation
+    │   └── joint_targets    (T, 12)  float32  — raw policy output
+    └── reward/
+        ├── total            (T,)     float32  — weighted sum
+        ├── time_penalty     (T,)     float32  — raw (unweighted) signal
+        ├── termination_penalty (T,)  float32  — raw signal (1.0 on last step if failed)
+        ├── goal_reached     (T,)     float32  — raw signal (1.0 on last step if success)
+        ├── goal_approach    (T,)     float32  — d(t-1) - d(t)
+        ├── command_tracking (T,)     float32  — -||vel_cmd - vel_achieved||
+        ├── command_smoothness (T,)   float32  — -||delta_vel_cmd||
+        ├── body_contact     (T,)     float32  — -sum(||F_nonfoot||)
+        └── uprightness      (T,)     float32  — clamp(-grav_z, 0, 1)
 ```
 
 `T` = number of 10 Hz steps. `contact_forces` has 17 bodies (full Spot articulation),
-not just the 4 feet — identify foot bodies by finding the 4 with highest mean force.
+not just the 4 feet — foot body indices are {3, 7, 11, 15}.
+
+**Reward storage design:** Raw (unweighted) component signals are stored alongside a
+pre-computed weighted total. The `RewardConfig` weights used are stored as file-level
+attributes (`reward_config/*`). This allows offline re-weighting without re-collecting,
+while providing a ready-to-use total for downstream RL/IL training. The same
+`rewards.py` module (`StepRewardComputer`) will be used for online DPPO training,
+ensuring reward consistency between offline and online phases.
+
+**Backward compatibility:** Datasets collected before the reward integration do not
+have a `reward/` group. `validate_dataset.py` and `explore_dataset.ipynb` handle both
+formats — missing rewards are computed offline from the obs/action data.
 
 ---
 
@@ -256,7 +283,7 @@ python scripts/rad-rl-project/tests/validate_dataset.py \
     --dataset scripts/rad-rl-project/datasets/warehouse_demos_20260311_122230.hdf5
 ```
 
-Returns exit code 0 (all pass) or 1 (failures). The 13 checks include:
+Returns exit code 0 (all pass) or 1 (failures). The 14 checks include:
 - All dataset keys, shapes, dtypes present
 - `velocity_cmd` within training ranges
 - `policy_obs[9:12] == velocity_cmd` exactly (data-integrity invariant)
@@ -264,6 +291,7 @@ Returns exit code 0 (all pass) or 1 (failures). The 13 checks include:
 - Quaternion norms ≈ 1.0
 - Camera not all-black
 - No position jumps > 1 m at 10 Hz
+- Reward datasets present, consistent length, `total ≈ weighted sum` (when rewards exist)
 
 **Visualisation:**
 Open `tests/explore_dataset.ipynb` in Jupyter (kernel: `isaaclab`). Sections:
@@ -276,6 +304,8 @@ Open `tests/explore_dataset.ipynb` in Jupyter (kernel: `isaaclab`). Sections:
 7. Contact force heatmaps
 8. Frame strip (8 evenly-spaced frames)
 9. Goal-distance over time
+10. Reward computation + component breakdown + cumulative return
+11. Body orientation / tilt (roll, pitch, projected gravity)
 
 ---
 
@@ -290,20 +320,35 @@ Open `tests/explore_dataset.ipynb` in Jupyter (kernel: `isaaclab`). Sections:
 
 ---
 
-## 10. What to work on next
+## 10. Reward system
+
+`rewards.py` defines all 8 reward terms in one place. Two APIs share the same math:
+
+- **`compute_episode_rewards()`** — offline batch over numpy arrays (for HDF5 analysis)
+- **`StepRewardComputer`** — online step-by-step (used in `collect_demos.py`, will be
+  used by DPPO training loop)
+
+Both use `RewardConfig` (a dataclass) for weights. The config is serializable via
+`to_dict()` / `from_dict()` and is stored as HDF5 file-level attributes.
+
+**Raw vs weighted storage:** Component signals are stored *unweighted*. The weighted
+total is also stored for convenience. To re-weight offline, just re-run
+`compute_episode_rewards()` with a different `RewardConfig`.
+
+---
+
+## 11. What to work on next
 
 The demo collection infrastructure is complete. Likely next steps:
 
 1. **Collect more episodes** — run more sessions until the dataset has enough
    successful episodes (goal reached) for imitation learning.
-2. **High-level policy training** — train a navigation policy that:
-   - Takes `camera_rgb` + `goal_relative` (or `base_pose`) as input
-   - Outputs `velocity_cmd` [v_x, v_y, ω_z]
-   - Can be trained with BC, GAIL, or IQL on the HDF5 dataset
-3. **Identify foot body indices** — the 17 contact-force bodies need to be mapped
-   to named links so foot-contact rewards can be computed offline.
-4. **Reward shaping offline** — all raw state components needed to define training
-   rewards are stored in the dataset (no re-simulation needed).
+2. **Distributional PPO (DPPO)** — implement online RL training using the same
+   `StepRewardComputer` from `rewards.py` as the reward function. The high-level
+   policy should take `camera_rgb` + `goal_relative` as input and output
+   `velocity_cmd` [v_x, v_y, ω_z].
+3. **Reward weight tuning** — iterate on `RewardConfig` weights using the offline
+   analysis in `explore_dataset.ipynb` before committing to DPPO training.
 
 ---
 

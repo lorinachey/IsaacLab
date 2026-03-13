@@ -104,6 +104,8 @@ from isaaclab_tasks.manager_based.locomotion.velocity.config.spot.agents.rsl_rl_
 from isaaclab_tasks.manager_based.locomotion.velocity.config.spot.mdp import reset_joints_around_default
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
+from rewards import RewardConfig, StepRewardComputer
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 # Slice of the 48-dim policy obs vector corresponding to velocity commands:
 #   [0:3]  base_lin_vel   [3:6]  base_ang_vel  [6:9]  projected_gravity
@@ -137,19 +139,33 @@ class HDF5DataCollector:
             action/
                 velocity_cmd        (T, 3)         float32  gamepad [v_x, v_y, omega_z]
                 joint_targets       (T, 12)        float32  raw policy output
+            reward/
+                total               (T,)           float32  weighted sum
+                time_penalty        (T,)           float32  raw (unweighted) signal
+                termination_penalty (T,)           float32  raw signal
+                goal_reached        (T,)           float32  raw signal
+                goal_approach       (T,)           float32  raw signal
+                command_tracking    (T,)           float32  raw signal
+                command_smoothness  (T,)           float32  raw signal
+                body_contact        (T,)           float32  raw signal
+                uprightness         (T,)           float32  raw signal
             attrs:
                 success             bool
                 episode_length      int
                 goal_position_world (3,)  float32
                 timestamp           str   ISO-8601 wall-clock time at flush
+                reward_config       dict  RewardConfig weights used
     """
 
-    def __init__(self, filepath: str, session_timestamp: str):
+    def __init__(self, filepath: str, session_timestamp: str, reward_config_dict: dict | None = None):
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         self._file = h5py.File(filepath, "a")
         self._episode_idx = len(self._file.keys())
         self._buf: dict[str, list] = defaultdict(list)
         self._file.attrs["session_timestamp"] = session_timestamp
+        if reward_config_dict is not None:
+            for k, v in reward_config_dict.items():
+                self._file.attrs[f"reward_config/{k}"] = v
         print(f"[DataCollector] Writing to {filepath} (starting at episode {self._episode_idx})")
 
     def buffer_step(
@@ -165,6 +181,8 @@ class HDF5DataCollector:
         policy_obs: np.ndarray,       # (48,)
         velocity_cmd: np.ndarray,     # (3,)
         joint_targets: np.ndarray,    # (12,)
+        reward_components: dict[str, float] | None = None,  # raw (unweighted) per-component
+        reward_total: float | None = None,
     ):
         self._buf["obs/camera_rgb"].append(camera_rgb)
         self._buf["obs/base_pose"].append(base_pose)
@@ -177,6 +195,48 @@ class HDF5DataCollector:
         self._buf["obs/policy_obs"].append(policy_obs)
         self._buf["action/velocity_cmd"].append(velocity_cmd)
         self._buf["action/joint_targets"].append(joint_targets)
+        if reward_components is not None:
+            for name, val in reward_components.items():
+                self._buf[f"reward/{name}"].append(np.float32(val))
+        if reward_total is not None:
+            self._buf["reward/total"].append(np.float32(reward_total))
+
+    def patch_last_step_rewards(self, sparse: dict[str, float]):
+        """Apply sparse end-of-episode rewards to the last buffered step.
+
+        Updates the raw component signals AND recomputes the weighted total
+        for that step using the stored reward_config weights.
+        """
+        for name, val in sparse.items():
+            key = f"reward/{name}"
+            if key in self._buf and self._buf[key]:
+                self._buf[key][-1] = np.float32(val)
+
+        # Recompute total for the last step from the (now-updated) components
+        if "reward/total" in self._buf and self._buf["reward/total"]:
+            # Read weights from file attrs
+            weights = {}
+            weight_map = {
+                "time_penalty": "w_time_penalty",
+                "termination_penalty": "w_termination",
+                "goal_reached": "w_goal_reached",
+                "goal_approach": "w_goal_approach",
+                "command_tracking": "w_command_tracking",
+                "command_smoothness": "w_command_smoothness",
+                "body_contact": "w_body_contact",
+                "uprightness": "w_uprightness",
+            }
+            for comp_name, attr_name in weight_map.items():
+                attr_key = f"reward_config/{attr_name}"
+                if attr_key in self._file.attrs:
+                    weights[comp_name] = float(self._file.attrs[attr_key])  # type: ignore[arg-type]
+
+            total = 0.0
+            for comp_name, w in weights.items():
+                key = f"reward/{comp_name}"
+                if key in self._buf and self._buf[key]:
+                    total += w * float(self._buf[key][-1])
+            self._buf["reward/total"][-1] = np.float32(total)
 
     def flush_episode(self, success: bool, goal_position_world: np.ndarray) -> int:
         """Write buffered steps as a new episode group and clear the buffer."""
@@ -324,7 +384,8 @@ def load_policy(env_wrapped, checkpoint_path: str, device: str):
 
 
 # ── Main collection loop ───────────────────────────────────────────────────────
-def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collector: HDF5DataCollector, args):
+def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collector: HDF5DataCollector,
+                    reward_computer: StepRewardComputer, args):
     env = env_wrapped.unwrapped
     device = env.device
 
@@ -363,8 +424,6 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
     while simulation_app.is_running() and not flags["quit"]:
         # ── 1. Read velocity command from gamepad ──────────────────────────
         vel_cmd = gamepad.advance()  # tensor (3,) on device: [v_x, v_y, omega_z]
-        # Clamp to the ranges seen during training so that asymmetric axes
-        # (e.g. lin_vel_x: [-2.0, +3.0]) are never commanded out-of-distribution.
         vel_cmd = torch.stack([
             vel_cmd[0].clamp(-2.0, 3.0),    # lin_vel_x: [-2.0, +3.0] m/s
             (-vel_cmd[1]).clamp(-1.5, 1.5), # lin_vel_y: negated to match physical stick direction
@@ -415,6 +474,16 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
             # Goal-relative position (world frame, XYZ)
             goal_rel = goal_pos_world - base_pos
 
+            obs_np = policy_obs[0].cpu().numpy()
+            cmd_np = vel_cmd.cpu().numpy()
+
+            reward_comps, reward_total = reward_computer.step(
+                policy_obs=obs_np,
+                vel_cmd=cmd_np,
+                goal_relative=goal_rel,
+                contact_forces=cf,
+            )
+
             collector.buffer_step(
                 camera_rgb=rgb,
                 base_pose=np.concatenate([base_pos, base_quat]),
@@ -424,9 +493,11 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
                 joint_vel=j_vel,
                 contact_forces=cf,
                 goal_relative=goal_rel,
-                policy_obs=policy_obs[0].cpu().numpy(),
-                velocity_cmd=vel_cmd.cpu().numpy(),
+                policy_obs=obs_np,
+                velocity_cmd=cmd_np,
                 joint_targets=actions[0].cpu().numpy(),
+                reward_components=reward_comps,
+                reward_total=reward_total,
             )
             data_step += 1
 
@@ -446,6 +517,10 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
 
             if env_done:
                 print("[INFO] Termination: robot fell or left bounds.")
+
+            # Apply sparse end-of-episode rewards to the last buffered step
+            sparse = reward_computer.finalize_episode(success=success)
+            collector.patch_last_step_rewards(sparse)
 
             if data_step >= args.min_episode_steps:
                 collector.flush_episode(success=success, goal_position_world=goal_pos_world)
@@ -467,6 +542,7 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
             flags["success"] = False
             flags["failure"] = False
             gamepad.reset()
+            reward_computer.reset()
 
             if args.num_episodes > 0 and episode_count >= args.num_episodes:
                 print(f"[INFO] Target of {args.num_episodes} episodes reached. Exiting.")
@@ -504,16 +580,24 @@ def main():
             v_x_sensitivity=3.0,    # lin_vel_x trained range: [-2.0, +3.0] m/s
             v_y_sensitivity=1.5,    # lin_vel_y trained range: [-1.5, +1.5] m/s
             omega_z_sensitivity=2.0,  # ang_vel_z trained range: [-2.0, +2.0] rad/s
-            dead_zone=0.12,   # 0.12 clears the ~0.09 drift observed on this controller
+            dead_zone=0.05,
             sim_device=device,
         )
     )
 
+    # Reward computation
+    reward_cfg = RewardConfig()
+    reward_computer = StepRewardComputer(reward_cfg)
+
     # HDF5 data collector
-    collector = HDF5DataCollector(stamped_filepath, session_timestamp=session_ts)
+    collector = HDF5DataCollector(
+        stamped_filepath,
+        session_timestamp=session_ts,
+        reward_config_dict=reward_cfg.to_dict(),
+    )
 
     try:
-        run_collection(env_wrapped, policy, agent_cfg, gamepad, collector, args_cli)
+        run_collection(env_wrapped, policy, agent_cfg, gamepad, collector, reward_computer, args_cli)
     finally:
         collector.close()
         env.close()

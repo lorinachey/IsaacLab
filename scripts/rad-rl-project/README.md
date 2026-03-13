@@ -12,6 +12,7 @@ frames, and actions are logged to HDF5 at 10 Hz.
 | File | Description |
 |---|---|
 | `collect_demos.py` | Main collection script |
+| `rewards.py` | Reward computation (offline + online) |
 | `spot-in-simple-warehouse.usd` | Warehouse simulation scene |
 | `environment.yml` | Conda environment specification |
 | `utils.ipynb` | Checkpoint upload to HuggingFace Hub |
@@ -174,6 +175,16 @@ episode_N/
     action/
         velocity_cmd        (T, 3)          float32 — gamepad command [v_x, v_y, ω_z]
         joint_targets       (T, 12)         float32 — raw policy output
+    reward/
+        total               (T,)            float32 — weighted sum of all components
+        time_penalty        (T,)            float32 — raw (unweighted) signal
+        termination_penalty (T,)            float32 — raw signal
+        goal_reached        (T,)            float32 — raw signal
+        goal_approach       (T,)            float32 — raw signal
+        command_tracking    (T,)            float32 — raw signal
+        command_smoothness  (T,)            float32 — raw signal
+        body_contact        (T,)            float32 — raw signal
+        uprightness         (T,)            float32 — raw signal
     attrs:
         success             bool
         episode_length      int
@@ -181,7 +192,9 @@ episode_N/
         timestamp           str             — ISO-8601 wall-clock time
 ```
 
-`T` is the number of 10 Hz timesteps in the episode.
+`T` is the number of 10 Hz timesteps in the episode. Reward components are stored
+as raw (unweighted) signals; the `RewardConfig` weights are stored as file-level
+attributes under `reward_config/*`.
 
 ---
 
