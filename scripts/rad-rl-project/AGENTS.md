@@ -95,7 +95,7 @@ the reasoning.
 ### 5.1 Joystick axis negation
 
 ```python
-# collect_demos.py  ~line 427
+# collect_demos.py  ~line 536
 vel_cmd = torch.stack([
     vel_cmd[0].clamp(-2.0, 3.0),    # v_x: no inversion needed
     (-vel_cmd[1]).clamp(-1.5, 1.5), # v_y: NEGATED — raw axis is inverted vs robot frame
@@ -112,7 +112,7 @@ labels (the logged `velocity_cmd` must match the human's intent).
 ### 5.2 Velocity command injection into policy obs
 
 ```python
-# collect_demos.py  ~line 443
+# collect_demos.py  ~line 546
 VEL_CMD_OBS_SLICE = slice(9, 12)   # indices in the 48-dim policy obs
 policy_obs[0, VEL_CMD_OBS_SLICE] = vel_cmd
 ```
@@ -170,14 +170,45 @@ This places Spot on the warehouse floor with 0.5 m clearance. The warehouse USD 
 its floor near Z = 0 world-space. Do not use Z = 0 or lower — Spot spawns inside
 the floor and the body-contact termination triggers immediately.
 
-### 5.6 Gamepad dead zone
+### 5.6 Controller input backend: EvdevGamepad (not Se2Gamepad / carb.input)
 
-`dead_zone=0.05` in `Se2GamepadCfg`. This filters raw stick values below 0.05
-(applied per-event inside `Se2Gamepad._on_gamepad_event` before sensitivity
-scaling). A value of 0.05 handles normal analog stick noise on a healthy
-controller. If you see drift, verify with `jstest /dev/input/js0` — the
-previous Rock Candy controller had a physically broken left-stick X axis
-(resting at 85% deflection) which no software dead zone could fix.
+**[IMPORTANT]** The script uses a custom `EvdevGamepad` class (defined in
+`collect_demos.py`) that reads `/dev/input/js0` directly via the Linux kernel
+joystick interface. It does **not** use `Se2Gamepad` or `carb.input`.
+
+**Why:** Isaac Sim's GLFW plugin uses an embedded SDL gamecontroller database
+to identify gamepads. Controllers absent from that database are silently
+rejected with:
+```
+Joystick with unknown remapping detected (will be ignored): <name> [<guid>]
+```
+causing `omni.appwindow.get_default_app_window().get_gamepad(0)` to return a
+null handle. The current controller — **PowerA Xbox Series X EnWired**
+(VID=20d6, PID=2002) — is not in GLFW's database.
+
+`EvdevGamepad` bypasses GLFW entirely. The `xpad` kernel driver handles this
+controller perfectly and exposes it at `/dev/input/js0`. The user must be in
+the `input` group (`sudo usermod -aG input $USER`) for read access.
+
+**`dead_zone=0.05`** is applied inside `EvdevGamepad.advance()`. Axis values
+below 0.05 are zeroed. If you see stick drift, verify with:
+```bash
+cat /dev/input/js0 | xxd   # raw bytes, or use jstest if installed
+```
+
+**Button constants** (xpad, 0-indexed in order of BTN_* kernel codes):
+```python
+JSPAD_A = 0   # success
+JSPAD_B = 1   # failure / reset
+JSPAD_START = 7   # quit
+```
+
+**Axis layout** (xpad → `/dev/input/js0`):
+```
+axis 0  ABS_X   Left stick X   (left=−1, right=+1)
+axis 1  ABS_Y   Left stick Y   (up=−1,   down=+1)   ← negated for v_x
+axis 3  ABS_RX  Right stick X  (left=−1, right=+1)
+```
 
 ---
 

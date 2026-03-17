@@ -75,12 +75,14 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import fcntl
 import importlib.metadata as metadata
 import os
+import struct
 from collections import defaultdict
 from datetime import datetime
 
-import carb.input
+import carb
 import gymnasium as gym
 import h5py
 import numpy as np
@@ -90,7 +92,6 @@ from rsl_rl.runners import OnPolicyRunner
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
-from isaaclab.devices.gamepad import Se2Gamepad, Se2GamepadCfg
 from isaaclab.envs.mdp.events import reset_root_state_uniform
 from isaaclab.managers import EventTermCfg, SceneEntityCfg
 from isaaclab.sensors import CameraCfg
@@ -117,6 +118,123 @@ LOG_HZ = 10           # camera / dataset logging rate
 LOG_EVERY_N = POLICY_HZ // LOG_HZ  # log every 5 policy steps
 
 WAREHOUSE_USD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spot-in-simple-warehouse.usd")
+
+# ── Direct joystick input constants ───────────────────────────────────────────
+# xpad button indices as reported by /dev/input/js0 (order matches the KEY bitmap)
+JSPAD_A     = 0   # BTN_A     — mark success
+JSPAD_B     = 1   # BTN_B     — mark failure / force reset
+JSPAD_X     = 2   # BTN_X
+JSPAD_Y     = 3   # BTN_Y
+JSPAD_LB    = 4   # BTN_TL
+JSPAD_RB    = 5   # BTN_TR
+JSPAD_BACK  = 6   # BTN_SELECT
+JSPAD_START = 7   # BTN_START — quit collection
+
+_JS_FMT  = "IhBB"               # time_ms(u32), value(s16), type(u8), number(u8)
+_JS_SIZE = struct.calcsize(_JS_FMT)
+_JS_EV_BUTTON = 0x01
+_JS_EV_AXIS   = 0x02
+_JS_EV_INIT   = 0x80
+
+
+# ── Direct joystick gamepad ────────────────────────────────────────────────────
+class EvdevGamepad:
+    """Reads velocity commands and button presses directly from /dev/input/js0.
+
+    Drop-in replacement for Se2Gamepad for controllers not in GLFW's embedded
+    gamecontroller database (e.g. PowerA Xbox Series X EnWired, VID=20d6
+    PID=2002).  GLFW silently ignores such devices with:
+        "Joystick with unknown remapping detected (will be ignored)"
+    causing carb.input's get_gamepad(0) to return a null handle.
+
+    This class reads the kernel joystick interface directly — the xpad driver
+    handles the controller regardless of GLFW's database.
+
+    Interface is identical to Se2Gamepad so existing axis negations and clamping
+    in run_collection() remain correct.
+
+    xpad axis layout (/dev/input/js0):
+        axis 0  ABS_X   Left stick X   (left=−1, right=+1)
+        axis 1  ABS_Y   Left stick Y   (up=−1,   down=+1)
+        axis 2  ABS_Z   Left trigger   (0 → +1)
+        axis 3  ABS_RX  Right stick X  (left=−1, right=+1)
+        axis 4  ABS_RY  Right stick Y  (up=−1,   down=+1)
+        axis 5  ABS_RZ  Right trigger  (0 → +1)
+    """
+
+    def __init__(
+        self,
+        device: str = "/dev/input/js0",
+        v_x_sensitivity: float = 1.0,
+        v_y_sensitivity: float = 1.0,
+        omega_z_sensitivity: float = 1.0,
+        dead_zone: float = 0.05,
+        sim_device: str = "cuda:0",
+    ):
+        self._dev = open(device, "rb")
+        fcntl.fcntl(self._dev, fcntl.F_SETFL, os.O_NONBLOCK)
+        self.v_x_sensitivity = v_x_sensitivity
+        self.v_y_sensitivity = v_y_sensitivity
+        self.omega_z_sensitivity = omega_z_sensitivity
+        self.dead_zone = dead_zone
+        self._sim_device = sim_device
+        self._axes: list[float] = [0.0] * 8
+        self._callbacks: dict[int, object] = {}
+        print(f"[EvdevGamepad] Opened {device} for direct joystick reading.")
+
+    def __del__(self):
+        try:
+            self._dev.close()
+        except Exception:
+            pass
+
+    def reset(self):
+        self._axes = [0.0] * 8
+
+    def add_callback(self, key: int, func) -> None:
+        """Register func to be called when button `key` (JSPAD_* constant) is pressed."""
+        self._callbacks[key] = func
+
+    def advance(self) -> torch.Tensor:
+        """Poll pending events and return a velocity command tensor.
+
+        Returns a (3,) tensor [v_x_raw, v_y_raw, omega_z_raw] using the same
+        sign convention as Se2Gamepad.advance(), so the clamping and negation
+        applied afterwards in run_collection() remain correct.
+        """
+        self._poll()
+
+        def dz(v: float) -> float:
+            return 0.0 if abs(v) < self.dead_zone else v
+
+        # Mirror Se2Gamepad sign conventions:
+        #   v_x_raw    = -axis[1] * sens  (left stick Y; up=−1 → positive forward)
+        #   v_y_raw    = +axis[0] * sens  (left stick X; negated later in run_collection)
+        #   omega_z_raw = +axis[3] * sens (right stick X; negated later in run_collection)
+        v_x_raw     = -dz(self._axes[1]) * self.v_x_sensitivity
+        v_y_raw     =  dz(self._axes[0]) * self.v_y_sensitivity
+        omega_z_raw =  dz(self._axes[3]) * self.omega_z_sensitivity
+        return torch.tensor([v_x_raw, v_y_raw, omega_z_raw], dtype=torch.float32, device=self._sim_device)
+
+    def close(self):
+        self._dev.close()
+
+    def _poll(self):
+        """Drain all pending joystick events from the device file descriptor."""
+        while True:
+            try:
+                data = self._dev.read(_JS_SIZE)
+                if not data:
+                    break
+                _, value, type_, number = struct.unpack(_JS_FMT, data)
+                type_ &= ~_JS_EV_INIT          # strip the "initial state" flag
+                if type_ == _JS_EV_AXIS and number < len(self._axes):
+                    self._axes[number] = value / 32767.0
+                elif type_ == _JS_EV_BUTTON and value == 1:
+                    if number in self._callbacks:
+                        self._callbacks[number]()
+            except (BlockingIOError, OSError):
+                break
 
 
 # ── Data collector ─────────────────────────────────────────────────────────────
@@ -384,7 +502,7 @@ def load_policy(env_wrapped, checkpoint_path: str, device: str):
 
 
 # ── Main collection loop ───────────────────────────────────────────────────────
-def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collector: HDF5DataCollector,
+def run_collection(env_wrapped, policy, agent_cfg, gamepad: EvdevGamepad, collector: HDF5DataCollector,
                     reward_computer: StepRewardComputer, args):
     env = env_wrapped.unwrapped
     device = env.device
@@ -398,9 +516,9 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
     # Gamepad button callbacks via shared flags dict
     flags = {"success": False, "failure": False, "quit": False}
 
-    gamepad.add_callback(carb.input.GamepadInput.A, lambda: flags.update({"success": True}))
-    gamepad.add_callback(carb.input.GamepadInput.B, lambda: flags.update({"failure": True}))
-    gamepad.add_callback(carb.input.GamepadInput.MENU1, lambda: flags.update({"quit": True}))
+    gamepad.add_callback(JSPAD_A,     lambda: flags.update({"success": True}))
+    gamepad.add_callback(JSPAD_B,     lambda: flags.update({"failure": True}))
+    gamepad.add_callback(JSPAD_START, lambda: flags.update({"quit": True}))
 
     obs, _ = env_wrapped.reset()
     gamepad.reset()
@@ -408,15 +526,6 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
     episode_count = 0
     physics_step = 0   # policy steps within current episode
     data_step = 0      # 10 Hz samples within current episode
-
-    # ── Gamepad diagnostics ────────────────────────────────────────────────────
-    gamepad_name = gamepad._input.get_gamepad_name(gamepad._gamepad)
-    print(f"\n[GAMEPAD] carb.input detected device: '{gamepad_name}'")
-    if not gamepad_name:
-        print("[GAMEPAD] WARNING: no gamepad detected by carb.input — "
-              "controller inputs will be ignored. Check that the controller "
-              "is plugged in and your user is in the 'input' group.")
-    # ──────────────────────────────────────────────────────────────────────────
 
     print("\n[INFO] Collection running. Drive Spot with the Xbox controller.")
     print("       A = success  |  B = failure/reset  |  START (MENU1) = quit\n")
@@ -565,18 +674,19 @@ def main():
     # Load locomotion policy
     policy, agent_cfg = load_policy(env_wrapped, checkpoint_path, device)
 
-    # Xbox controller (Se2Gamepad outputs [v_x, v_y, omega_z])
+    # Prevent Isaac Sim from consuming gamepad events for camera control.
+    carb.settings.get_settings().set_bool("/persistent/app/omniverse/gamepadCameraControl", False)
+
+    # Xbox controller — read directly from the kernel joystick interface.
     # v_x_sensitivity=3.0 maps full-forward stick to the training max of +3 m/s.
     # Commands are clamped to training ranges inside run_collection so that
     # full-backward stick (-3.0) is clipped to the trained minimum of -2.0 m/s.
-    gamepad = Se2Gamepad(
-        Se2GamepadCfg(
-            v_x_sensitivity=3.0,    # lin_vel_x trained range: [-2.0, +3.0] m/s
-            v_y_sensitivity=1.5,    # lin_vel_y trained range: [-1.5, +1.5] m/s
-            omega_z_sensitivity=2.0,  # ang_vel_z trained range: [-2.0, +2.0] rad/s
-            dead_zone=0.05,
-            sim_device=device,
-        )
+    gamepad = EvdevGamepad(
+        v_x_sensitivity=3.0,      # lin_vel_x trained range: [-2.0, +3.0] m/s
+        v_y_sensitivity=1.5,      # lin_vel_y trained range: [-1.5, +1.5] m/s
+        omega_z_sensitivity=2.0,  # ang_vel_z trained range: [-2.0, +2.0] rad/s
+        dead_zone=0.05,
+        sim_device=device,
     )
 
     # Reward computation
@@ -593,6 +703,7 @@ def main():
     try:
         run_collection(env_wrapped, policy, agent_cfg, gamepad, collector, reward_computer, args_cli)
     finally:
+        gamepad.close()
         collector.close()
         env.close()
         print(f"\n[INFO] Dataset saved to: {stamped_filepath}")
