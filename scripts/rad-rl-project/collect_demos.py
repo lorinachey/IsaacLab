@@ -322,7 +322,7 @@ def build_env_cfg(args):
         init_state=AssetBaseCfg.InitialStateCfg(pos=goal_pos),
     )
 
-    env_cfg.scene.robot.init_state.pos = (6.0, -8.5, 0.5)
+    env_cfg.scene.robot.init_state.pos = (7.0, -8.5, 0.5)
 
     # Disable terminations and curriculum that require a procedural terrain_generator;
     # both crash on a static USD scene where terrain_generator is None.
@@ -429,12 +429,6 @@ def run_collection(env_wrapped, policy, agent_cfg, gamepad: Se2Gamepad, collecto
             (-vel_cmd[1]).clamp(-1.5, 1.5), # lin_vel_y: negated to match physical stick direction
             (-vel_cmd[2]).clamp(-2.0, 2.0),  # ang_vel_z: negated to match physical stick direction
         ])
-
-        # Print vel_cmd once per second so you can verify controller input.
-        # Remove this block once the controller is confirmed working.
-        if physics_step % POLICY_HZ == 0:
-            vc = vel_cmd.cpu().numpy()
-            print(f"[GAMEPAD] vel_cmd  vx={vc[0]:+.3f}  vy={vc[1]:+.3f}  wz={vc[2]:+.3f}")
 
         # ── 2. Inject gamepad command into obs for the locomotion policy ───
         # The env's internal command manager may have resampled; we replace

@@ -17,8 +17,8 @@ frames, and actions are logged to HDF5 at 10 Hz.
 | `environment.yml` | Conda environment specification |
 | `utils.ipynb` | Checkpoint upload to HuggingFace Hub |
 | `AGENTS.md` | AI agent briefing — architecture, decisions, gotchas |
-| `tests/validate_dataset.py` | CLI validation script (13 structural/semantic checks) |
-| `tests/explore_dataset.ipynb` | Jupyter visualisation notebook (9 sections) |
+| `tests/validate_dataset.py` | CLI validation script (14 structural/semantic checks) |
+| `tests/explore_dataset.ipynb` | Jupyter visualisation notebook (11 sections) |
 
 ---
 
@@ -126,7 +126,7 @@ A session timestamp is always appended so no previous session is overwritten.
 | `--checkpoint` | *(required)* | Path to `.pt` policy checkpoint |
 | `--dataset_file` | `./datasets/warehouse_demos.hdf5` | HDF5 output path (timestamp appended) |
 | `--num_episodes` | `0` (infinite) | Stop after N episodes; 0 = run until START |
-| `--goal_position X Y Z` | `8.0 0.0 0.0` | World-frame position of the green goal sphere |
+| `--goal_position X Y Z` | `8.76 -1.27 0.0` | World-frame position of the green goal sphere |
 | `--success_radius` | `0.5` | Auto-success distance to goal (metres) |
 | `--min_episode_steps` | `10` | Minimum 10 Hz steps to save an episode |
 | `--camera_height` | `240` | Logged RGB frame height (pixels) |

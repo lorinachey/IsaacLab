@@ -95,7 +95,7 @@ the reasoning.
 ### 5.1 Joystick axis negation
 
 ```python
-# collect_demos.py  ~line 368
+# collect_demos.py  ~line 427
 vel_cmd = torch.stack([
     vel_cmd[0].clamp(-2.0, 3.0),    # v_x: no inversion needed
     (-vel_cmd[1]).clamp(-1.5, 1.5), # v_y: NEGATED — raw axis is inverted vs robot frame
@@ -112,7 +112,7 @@ labels (the logged `velocity_cmd` must match the human's intent).
 ### 5.2 Velocity command injection into policy obs
 
 ```python
-# collect_demos.py  ~line 384
+# collect_demos.py  ~line 443
 VEL_CMD_OBS_SLICE = slice(9, 12)   # indices in the 48-dim policy obs
 policy_obs[0, VEL_CMD_OBS_SLICE] = vel_cmd
 ```
@@ -163,7 +163,7 @@ env_cfg.events.push_robot = None   # must be explicitly disabled
 ### 5.5 Spawn position
 
 ```python
-env_cfg.scene.robot.init_state.pos = (6.0, -8.5, 0.5)
+env_cfg.scene.robot.init_state.pos = (7.0, -8.5, 0.5)
 ```
 
 This places Spot on the warehouse floor with 0.5 m clearance. The warehouse USD has
@@ -352,7 +352,7 @@ The demo collection infrastructure is complete. Likely next steps:
 
 ---
 
-## 11. Key source files outside this directory
+## 12. Key source files outside this directory
 
 | File | Relevance |
 |------|-----------|
