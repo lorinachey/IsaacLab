@@ -353,6 +353,12 @@ Open `tests/explore_dataset.ipynb` in Jupyter (kernel: `isaaclab`). Sections:
 
 ## 10. Reward system
 
+**[IMPORTANT] Termination penalty weight history:**
+- Original: `w_termination = -10.0` — too weak. A long failure episode (e.g. T=200 steps) could accumulate enough per-step reward to match or exceed a safe episode, making failure and success distributions indistinguishable.
+- Current: `w_termination = -100.0` — 10× increase so a single fall dominates the cumulative return regardless of episode length. In principle, a robot falling or breaking should carry a very high cost.
+
+
+
 `rewards.py` defines all 8 reward terms in one place. Two APIs share the same math:
 
 - **`compute_episode_rewards()`** — offline batch over numpy arrays (for HDF5 analysis)

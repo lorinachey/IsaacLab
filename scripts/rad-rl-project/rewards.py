@@ -79,7 +79,7 @@ class RewardConfig:
     w_time_penalty: float = -0.1
 
     # 2. Termination penalty (applied once on last step of failed episode)
-    w_termination: float = -10.0
+    w_termination: float = -100.0
 
     # 3. Goal reached bonus (applied once on last step of successful episode)
     w_goal_reached: float = 10.0
